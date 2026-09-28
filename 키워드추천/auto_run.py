@@ -3,7 +3,7 @@
 자동 실행: 엑셀에서 C열(핵심키워드)이 빈 줄을 찾아
   1) 내 PC의 Claude Code(claude 명령)에게 핵심키워드를 뽑게 해서 C열에 넣고
   2) 네이버 검색광고 API로 경쟁 낮은 추천키워드 3개를 D열에 넣은 뒤
-  3) 같은 엑셀 파일에 저장합니다.
+  3) 원래 엑셀 파일(C:\자동화시스템 의 '핵심키워드' 엑셀)에 그대로 저장합니다. 저장 전 백업 폴더에 복사본을 남깁니다.
 
 사용법:
     python auto_run.py                         (기본 파일, 빈 줄 200개)
@@ -21,7 +21,6 @@ from openpyxl import load_workbook
 
 import recommend_keywords as rk
 
-DEFAULT_INPUT = r"C:\자동화시스템\합친결과_키워드.xlsx"
 NAME_COL, TAG_COL = 1, 2          # A열 상품명, B열 태그
 CHUNK = 50                        # Claude에게 한 번에 보내는 상품 수
 
@@ -96,7 +95,7 @@ def main() -> None:
         i = args.index("--count")
         count = int(args[i + 1])
         del args[i:i + 2]
-    in_path = Path(args[0] if args else DEFAULT_INPUT)
+    in_path = Path(args[0]) if args else rk.default_input()
     if not in_path.exists():
         sys.exit(f"파일을 찾을 수 없습니다: {in_path}")
 
@@ -154,13 +153,7 @@ def main() -> None:
         print("\n중단됨 - 지금까지 결과를 저장합니다.")
     finally:
         print("저장 중...")
-        try:
-            wb.save(in_path)
-            print(f"저장 완료: {in_path}")
-        except PermissionError:
-            alt = in_path.with_name(in_path.stem + "_새로저장.xlsx")
-            wb.save(alt)
-            print(f"엑셀 파일이 열려 있어 다른 이름으로 저장했습니다: {alt}")
+        rk.backup_and_save(wb, in_path)
 
 
 if __name__ == "__main__":

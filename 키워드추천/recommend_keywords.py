@@ -20,7 +20,9 @@ CLIENT_ID/SECRET 이 없으면 상품 수를 못 구하므로, 검색광고 API�
     python recommend_keywords.py --limit 5       (시험용: 5개만)
 """
 import base64
+import datetime
 import hashlib
+import shutil
 import hmac
 import html
 import re
@@ -33,7 +35,8 @@ import requests
 from openpyxl import load_workbook
 
 # ───────── 설정 ─────────
-DEFAULT_INPUT = r"C:\자동화시스템\합친결과_키워드.xlsx"
+BASE_DIR = Path(r"C:\자동화시스템")
+FALLBACK_INPUT = BASE_DIR / "합친결과_키워드.xlsx"
 KEYWORD_COL = 3          # C열 = 핵심키워드
 RESULT_COL = 4           # D열 = 추천키워드 3개
 DETAIL_COL = 5           # E열 = 상세
@@ -43,8 +46,40 @@ MAX_CANDIDATES = 15      # 핵심키워드 하나당 상품수를 조회할 후�
 # ────────────────────────
 
 HERE = Path(__file__).resolve().parent
+BACKUP_KEEP = 5          # 백업 폴더에 남겨둘 개수
 AD_URL, AD_URI = "https://api.searchad.naver.com", "/keywordstool"
 SHOP_URL = "https://openapi.naver.com/v1/search/shop.json"
+
+
+def default_input() -> Path:
+    """C:\자동화시스템 에서 이름에 '핵심키워드'가 들어간 엑셀을 찾음. 없으면 합친결과_키워드.xlsx."""
+    skip = ("~$", )
+    found = sorted(p for p in BASE_DIR.glob("*핵심키워드*.xlsx")
+                   if not p.name.startswith(skip) and "_새로저장" not in p.stem)
+    if len(found) == 1:
+        return found[0]
+    if len(found) > 1:
+        sys.exit("'핵심키워드'가 들어간 엑셀이 여러 개입니다. 쓸 파일을 bat 위로 끌어다 놓아 주세요:\n  "
+                 + "\n  ".join(p.name for p in found))
+    return FALLBACK_INPUT
+
+
+def backup_and_save(wb, path: Path) -> None:
+    """저장 전에 원본을 백업 폴더에 복사한 뒤, 원본 파일에 그대로 저장."""
+    bdir = path.parent / "백업"
+    bdir.mkdir(exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    shutil.copy2(path, bdir / f"{path.stem}_{stamp}{path.suffix}")
+    for old in sorted(bdir.glob(f"{path.stem}_*{path.suffix}"))[:-BACKUP_KEEP]:
+        old.unlink()
+    try:
+        wb.save(path)
+        print(f"저장 완료: {path}  (백업: {bdir})")
+    except PermissionError:
+        alt = path.with_name(path.stem + "_새로저장.xlsx")
+        wb.save(alt)
+        print(f"※ 엑셀 파일이 열려 있어 원본에 저장하지 못했습니다. 다른 이름으로 저장: {alt}")
+        print("   엑셀을 닫고 다시 실행하면 원본에 반영됩니다.")
 
 
 def load_keys() -> dict:
@@ -183,7 +218,7 @@ def main() -> None:
         i = args.index("--limit")
         limit = int(args[i + 1])
         del args[i:i + 2]
-    in_path = Path(args[0] if args else DEFAULT_INPUT)
+    in_path = Path(args[0]) if args else default_input()
     if not in_path.exists():
         sys.exit(f"파일을 찾을 수 없습니다: {in_path}")
     keys, my_brands = load_keys(), load_brands()
@@ -205,7 +240,6 @@ def main() -> None:
         todo = dict(list(todo.items())[:limit])
     print(f"처리할 핵심키워드 {len(todo)}개 (D열이 이미 채워진 줄은 건너뜀)")
 
-    out = in_path.with_name(in_path.stem + "_추천.xlsx") if "_추천" not in in_path.stem else in_path
     try:
         for n, (core, rows) in enumerate(todo.items(), 1):
             try:
@@ -220,8 +254,7 @@ def main() -> None:
         print("\n중단됨 - 지금까지 결과를 저장합니다.")
     finally:
         print("저장 중...")
-        wb.save(out)
-        print(f"저장 완료: {out}")
+        backup_and_save(wb, in_path)
 
 
 if __name__ == "__main__":
