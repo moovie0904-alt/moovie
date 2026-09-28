@@ -17,6 +17,7 @@ CLIENT_ID/SECRET 이 없으면 상품 수를 못 구하므로, 검색광고 API�
 사용법:
     python recommend_keywords.py                 (기본 파일, D열이 빈 줄만 처리)
     python recommend_keywords.py "D:\파일.xlsx"
+    python recommend_keywords.py --limit 5       (시험용: 5개만)
 """
 import base64
 import hashlib
@@ -176,7 +177,13 @@ def recommend(keys, core: str, my_brands: set[str]) -> tuple[str, str]:
 
 
 def main() -> None:
-    in_path = Path(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_INPUT)
+    args = sys.argv[1:]
+    limit = None
+    if "--limit" in args:
+        i = args.index("--limit")
+        limit = int(args[i + 1])
+        del args[i:i + 2]
+    in_path = Path(args[0] if args else DEFAULT_INPUT)
     if not in_path.exists():
         sys.exit(f"파일을 찾을 수 없습니다: {in_path}")
     keys, my_brands = load_keys(), load_brands()
@@ -194,6 +201,8 @@ def main() -> None:
         core, done = ws.cell(r, KEYWORD_COL).value, ws.cell(r, RESULT_COL).value
         if core and str(core).strip() and not done:
             todo.setdefault(str(core).strip(), []).append(r)
+    if limit:
+        todo = dict(list(todo.items())[:limit])
     print(f"처리할 핵심키워드 {len(todo)}개 (D열이 이미 채워진 줄은 건너뜀)")
 
     out = in_path.with_name(in_path.stem + "_추천.xlsx") if "_추천" not in in_path.stem else in_path
