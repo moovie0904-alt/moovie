@@ -129,24 +129,12 @@ def main() -> None:
 
         # 2) D열 추천키워드 (naver_key.txt 가 있을 때만)
         if (rk.HERE / "naver_key.txt").exists():
-            keys, brands = rk.load_keys(), rk.load_brands()
-            ws.cell(1, rk.RESULT_COL).value = "추천키워드(경쟁강도 낮은순)"
-            ws.cell(1, rk.DETAIL_COL).value = "상세"
             need = {}
             for r in range(2, ws.max_row + 1):
                 core = clean(ws.cell(r, rk.KEYWORD_COL).value)
                 if core and not ws.cell(r, rk.RESULT_COL).value:
                     need.setdefault(core, []).append(r)
-            print(f"추천키워드(D열)를 찾을 핵심키워드: {len(need)}개")
-            for n, (core, rows) in enumerate(need.items(), 1):
-                try:
-                    result, detail = rk.recommend(keys, core, brands)
-                except rk.requests.RequestException as e:
-                    result, detail = "", f"오류: {e}"
-                for r in rows:
-                    ws.cell(r, rk.RESULT_COL).value = result
-                    ws.cell(r, rk.DETAIL_COL).value = detail
-                print(f"  [{n}/{len(need)}] {core} → {result or detail}")
+            rk.fill_recommendations(ws, rk.load_keys(), need)
         else:
             print("※ naver_key.txt 가 없어 D열(추천키워드)은 건너뜁니다.")
     except KeyboardInterrupt:

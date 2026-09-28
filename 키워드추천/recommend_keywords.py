@@ -12,7 +12,11 @@ E열에는 확인용으로 각 키워드의 경쟁강도·검색량·상품수�
     CLIENT_SECRET=    (네이버 개발자센터 > 애플리케이션 Client Secret)  ← 없어도 됨
 
 CLIENT_ID/SECRET 이 없으면 상품 수를 못 구하므로, 검색광고 API의 경쟁정도(낮음<중간<높음)가
-낮은 순 → 같은 등급이면 검색량 많은 순으로 고릅니다. 브랜드는 브랜드목록.txt 로만 걸러집니다.
+낮은 순 → 같은 등급이면 검색량 많은 순으로 고릅니다.
+
+브랜드 걸러내기: ① 브랜드목록.txt 에 적은 브랜드 ② PC에 Claude Code(claude 명령)가 있으면
+후보 키워드 중 브랜드·캐릭터·차종·연예인 이름이 들어간 것을 Claude가 판정 (결과는 브랜드판정.csv 에 저장해 재사용)
+③ 쇼핑 API 키가 있으면 상위 상품 브랜드
 
 사용법:
     python recommend_keywords.py                 (기본 파일, D열이 빈 줄만 처리)
@@ -20,7 +24,11 @@ CLIENT_ID/SECRET 이 없으면 상품 수를 못 구하므로, 검색광고 API�
     python recommend_keywords.py --limit 5       (시험용: 5개만)
 """
 import base64
+import csv
 import datetime
+import json
+import os
+import subprocess
 import hashlib
 import shutil
 import hmac
@@ -47,6 +55,7 @@ MAX_CANDIDATES = 15      # 핵심키워드 하나당 상품수를 조회할 후�
 
 HERE = Path(__file__).resolve().parent
 BACKUP_KEEP = 5          # 백업 폴더에 남겨둘 개수
+BRAND_CACHE = HERE / "브랜드판정.csv"
 AD_URL, AD_URI = "https://api.searchad.naver.com", "/keywordstool"
 SHOP_URL = "https://openapi.naver.com/v1/search/shop.json"
 
@@ -181,23 +190,72 @@ def has_shopping(keys) -> bool:
     return bool(keys.get("CLIENT_ID") and keys.get("CLIENT_SECRET"))
 
 
-def recommend(keys, core: str, my_brands: set[str]) -> tuple[str, str]:
+def gather(keys, core: str) -> list[tuple[str, int, str]]:
+    """연관 키워드 중 같은 종류·검색량 기준을 통과한 후보 (검색량 많은 순)."""
     cands = {}
     for kw, vol, comp in related_keywords(keys, core):
         if vol >= MIN_SEARCH and is_related(kw, core):
             cands.setdefault(norm(kw), (kw, vol, comp))
+    return sorted(cands.values(), key=lambda x: -x[1])[:MAX_CANDIDATES]
 
+
+def find_claude():
+    exe = shutil.which("claude")
+    if exe:
+        return exe
+    guess = Path(os.environ.get("USERPROFILE", "")) / ".local" / "bin" / "claude.exe"
+    return str(guess) if guess.exists() else None
+
+
+BRAND_PROMPT = """아래 표준입력의 각 줄은 네이버 쇼핑 검색 키워드 하나다.
+이 중 브랜드명·회사명·상표·캐릭터·연예인/선수 이름·차종/모델명·게임/애니/드라마 제목이 들어간 키워드만 골라 brands 배열로 돌려준다.
+일반 명사로만 된 키워드(예: 과일트레이, 캠핑랜턴, 차량용보조의자)는 넣지 않는다. 입력에 있는 글자 그대로 돌려준다.
+파일을 읽거나 쓰지 말고, 도구를 쓰지 말고, 결과만 돌려준다."""
+BRAND_SCHEMA = {"type": "object", "properties": {"brands": {"type": "array", "items": {"type": "string"}}},
+                "required": ["brands"]}
+
+
+def claude_brands(words: list[str]) -> set[str]:
+    """Claude에게 브랜드 키워드를 판정받음. 이미 판정한 키워드는 브랜드판정.csv 에서 재사용."""
+    cache = {}
+    if BRAND_CACHE.exists():
+        with open(BRAND_CACHE, encoding="utf-8-sig", newline="") as f:
+            cache = {row[0]: row[1] == "1" for row in csv.reader(f) if len(row) >= 2}
+    unknown = sorted({norm(w) for w in words} - set(cache))
+    claude = find_claude() if unknown else None
+    if unknown and not claude:
+        print("  ※ Claude Code가 없어 브랜드는 브랜드목록.txt 로만 거릅니다.")
+    for s in range(0, len(unknown) if claude else 0, 300):
+        chunk = unknown[s:s + 300]
+        print(f"  Claude에게 브랜드 판정 요청 중... ({s + len(chunk)}/{len(unknown)})")
+        try:
+            proc = subprocess.run([claude, "-p", BRAND_PROMPT, "--output-format", "json",
+                                   "--json-schema", json.dumps(BRAND_SCHEMA)],
+                                  input="\n".join(chunk), capture_output=True, text=True,
+                                  encoding="utf-8", timeout=900)
+            data = json.loads(proc.stdout)
+            out = data.get("structured_output") or json.loads(data.get("result", "{}"))
+            flagged = {norm(b) for b in out.get("brands", [])}
+        except (json.JSONDecodeError, subprocess.TimeoutExpired, TypeError, AttributeError) as e:
+            print(f"  ※ 브랜드 판정 실패 ({e}) - 이번엔 건너뜀")
+            continue
+        for w in chunk:
+            cache[w] = w in flagged
+    with open(BRAND_CACHE, "w", encoding="utf-8-sig", newline="") as f:
+        csv.writer(f).writerows([k, "1" if v else "0"] for k, v in sorted(cache.items()))
+    return {w for w, b in cache.items() if b}
+
+
+def pick(keys, cands, brand_set: set[str], my_brands: set[str]) -> tuple[str, str]:
+    cands = [c for c in cands if norm(c[0]) not in brand_set and not is_brand(c[0], [], my_brands)]
     if not has_shopping(keys):  # 쇼핑 API 없이: 광고 경쟁정도 낮은 순 → 검색량 많은 순
-        ranked = sorted((c for c in cands.values() if not is_brand(c[0], [], my_brands)),
-                        key=lambda c: (COMP_RANK.get(c[2], 3), -c[1]))[:PICK]
+        ranked = sorted(cands, key=lambda c: (COMP_RANK.get(c[2], 3), -c[1]))[:PICK]
         if not ranked:
             return "", "조회된 연관키워드 없음"
         return (" ".join(kw for kw, _, _ in ranked),
                 " / ".join(f"{kw} 경쟁{comp} (검색 {vol:,})" for kw, vol, comp in ranked))
-
-    top = sorted(cands.values(), key=lambda x: -x[1])[:MAX_CANDIDATES]
     scored = []
-    for kw, vol, _ in top:
+    for kw, vol, _ in cands:
         total, brands = shopping(keys, kw)
         if is_brand(kw, brands, my_brands):
             continue
@@ -211,6 +269,40 @@ def recommend(keys, core: str, my_brands: set[str]) -> tuple[str, str]:
             " / ".join(f"{kw} 경쟁{r:.1f} (검색 {v:,}, 상품 {t:,})" for r, kw, v, t in best))
 
 
+def recommend(keys, core: str, my_brands: set[str]) -> tuple[str, str]:
+    cands = gather(keys, core)
+    return pick(keys, cands, claude_brands([c[0] for c in cands]), my_brands)
+
+
+def fill_recommendations(ws, keys, todo: dict[str, list[int]]) -> None:
+    """todo = {핵심키워드: [행번호...]}. 후보를 모두 모은 뒤 브랜드를 한꺼번에 판정하고 D·E열을 채움."""
+    my_brands = load_brands()
+    ws.cell(1, RESULT_COL).value = "추천키워드(경쟁강도 낮은순)"
+    ws.cell(1, DETAIL_COL).value = "상세"
+    print(f"연관 키워드 모으는 중... ({len(todo)}개)")
+    gathered, errors = {}, {}
+    for n, core in enumerate(todo, 1):
+        try:
+            gathered[core] = gather(keys, core)
+        except requests.RequestException as e:
+            errors[core] = f"오류: {e}"
+        if n % 20 == 0:
+            print(f"  {n}/{len(todo)}")
+    brand_set = claude_brands([c[0] for cs in gathered.values() for c in cs])
+    for n, (core, rows) in enumerate(todo.items(), 1):
+        if core in errors:
+            result, detail = "", errors[core]
+        else:
+            try:
+                result, detail = pick(keys, gathered[core], brand_set, my_brands)
+            except requests.RequestException as e:
+                result, detail = "", f"오류: {e}"
+        for r in rows:
+            ws.cell(r, RESULT_COL).value = result
+            ws.cell(r, DETAIL_COL).value = detail
+        print(f"  [{n}/{len(todo)}] {core} → {result or detail}")
+
+
 def main() -> None:
     args = sys.argv[1:]
     limit = None
@@ -221,16 +313,13 @@ def main() -> None:
     in_path = Path(args[0]) if args else default_input()
     if not in_path.exists():
         sys.exit(f"파일을 찾을 수 없습니다: {in_path}")
-    keys, my_brands = load_keys(), load_brands()
+    keys = load_keys()
     if not has_shopping(keys):
         print("※ 쇼핑 API 키(CLIENT_ID/SECRET)가 없어 '광고 경쟁정도' 기준으로 고릅니다.")
 
     print(f"읽는 중: {in_path} (상품이 많으면 1~2분 걸립니다)")
     wb = load_workbook(in_path)
     ws = wb.active
-    ws.cell(1, RESULT_COL).value = "추천키워드(경쟁강도 낮은순)"
-    ws.cell(1, DETAIL_COL).value = "상세"
-
     todo = {}
     for r in range(2, ws.max_row + 1):
         core, done = ws.cell(r, KEYWORD_COL).value, ws.cell(r, RESULT_COL).value
@@ -241,15 +330,7 @@ def main() -> None:
     print(f"처리할 핵심키워드 {len(todo)}개 (D열이 이미 채워진 줄은 건너뜀)")
 
     try:
-        for n, (core, rows) in enumerate(todo.items(), 1):
-            try:
-                result, detail = recommend(keys, core, my_brands)
-            except requests.RequestException as e:
-                result, detail = "", f"오류: {e}"
-            for r in rows:
-                ws.cell(r, RESULT_COL).value = result
-                ws.cell(r, DETAIL_COL).value = detail
-            print(f"  [{n}/{len(todo)}] {core} → {result or detail}")
+        fill_recommendations(ws, keys, todo)
     except KeyboardInterrupt:
         print("\n중단됨 - 지금까지 결과를 저장합니다.")
     finally:
