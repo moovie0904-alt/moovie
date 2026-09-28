@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-폴더 안의 모든 엑셀(.xlsx/.xlsm/.xls)과 CSV 파일을 하나로 합치고,
+폴더 안의 모든 엑셀(.xlsx/.xlsm/.xls)의 '디셀' 시트와 CSV 파일을 하나로 합치고,
 완전히 똑같은 행(중복)은 한 번만 남깁니다.
 
 사용법:
@@ -15,6 +15,9 @@ import pandas as pd
 DEFAULT_FOLDER = r"C:\자동화시스템\디셀양식"
 OUTPUT_NAME = "합친결과.xlsx"
 SOURCE_COL = "원본파일"
+SHEET_NAME = "디셀"        # 이 이름의 시트만 합침 (없으면 첫 번째 시트)
+KEY_COLUMN = "상품명"      # 이 칸이 있는 줄을 제목 줄로 봄
+VERSION = "3"
 
 
 def clean_header(value, idx: int) -> str:
@@ -29,9 +32,15 @@ def to_table(raw: pd.DataFrame) -> pd.DataFrame:
     raw = raw.dropna(how="all").dropna(axis=1, how="all")
     if raw.empty:
         return raw
-    # 위쪽 20줄 중 칸이 가장 많이 채워진 첫 줄을 제목 줄로 본다
-    top = raw.head(20)
-    header_pos = int(top.notna().sum(axis=1).to_numpy().argmax())
+    # '상품명' 칸이 있는 줄을 제목 줄로 본다. 없으면 위쪽 30줄 중 가장 많이 채워진 줄.
+    top = raw.head(30)
+    header_pos = None
+    for pos in range(len(top)):
+        if any(clean_header(v, 0) == KEY_COLUMN for v in top.iloc[pos]):
+            header_pos = pos
+            break
+    if header_pos is None:
+        header_pos = int(top.notna().sum(axis=1).to_numpy().argmax())
 
     names, seen = [], {}
     for i, v in enumerate(raw.iloc[header_pos]):
@@ -59,18 +68,17 @@ def read_file(path: Path) -> list[pd.DataFrame]:
                 continue
         raise ValueError("CSV 인코딩을 알 수 없습니다")
 
-    sheets = pd.read_excel(path, sheet_name=None, dtype=str, header=None)
-    frames = []
-    for sheet_name, raw in sheets.items():
-        table = to_table(raw)
-        if table.empty:
-            continue
-        label = path.name if len(sheets) == 1 else f"{path.name} [{sheet_name}]"
-        frames.append(table.assign(**{SOURCE_COL: label}))
-    return frames
+    names = pd.ExcelFile(path).sheet_names
+    sheet = SHEET_NAME if SHEET_NAME in names else names[0]
+    raw = pd.read_excel(path, sheet_name=sheet, dtype=str, header=None)
+    table = to_table(raw)
+    if KEY_COLUMN not in table.columns:
+        print(f"  ※ 주의: {path.name} [{sheet}] 시트에서 '{KEY_COLUMN}' 칸을 찾지 못했습니다")
+    return [table.assign(**{SOURCE_COL: path.name})]
 
 
 def main() -> None:
+    print(f"엑셀 합치기 (버전 {VERSION})")
     folder = Path(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_FOLDER)
     if not folder.is_dir():
         sys.exit(f"폴더를 찾을 수 없습니다: {folder}")
@@ -109,6 +117,7 @@ def main() -> None:
 
     # 원본파일 열은 맨 뒤로
     result = result[data_cols + [SOURCE_COL]]
+    print(f"합친 열: {', '.join(map(str, data_cols))}")
 
     out = folder / OUTPUT_NAME
     result.to_excel(out, index=False)
