@@ -8,8 +8,11 @@ E열에는 확인용으로 각 키워드의 경쟁강도·검색량·상품수�
     CUSTOMER_ID=      (검색광고 > SA API 사용 관리)
     API_KEY=          (검색광고 액세스라이선스)
     SECRET_KEY=       (검색광고 비밀키)
-    CLIENT_ID=        (네이버 개발자센터 > 애플리케이션 Client ID)
-    CLIENT_SECRET=    (네이버 개발자센터 > 애플리케이션 Client Secret)
+    CLIENT_ID=        (네이버 개발자센터 > 애플리케이션 Client ID)      ← 없어도 됨
+    CLIENT_SECRET=    (네이버 개발자센터 > 애플리케이션 Client Secret)  ← 없어도 됨
+
+CLIENT_ID/SECRET 이 없으면 상품 수를 못 구하므로, 검색광고 API의 경쟁정도(낮음<중간<높음)가
+낮은 순 → 같은 등급이면 검색량 많은 순으로 고릅니다. 브랜드는 브랜드목록.txt 로만 걸러집니다.
 
 사용법:
     python recommend_keywords.py                 (기본 파일, D열이 빈 줄만 처리)
@@ -52,7 +55,7 @@ def load_keys() -> dict:
         if "=" in line:
             k, v = line.split("=", 1)
             keys[k.strip().upper()] = v.strip()
-    missing = [k for k in ("CUSTOMER_ID", "API_KEY", "SECRET_KEY", "CLIENT_ID", "CLIENT_SECRET") if not keys.get(k)]
+    missing = [k for k in ("CUSTOMER_ID", "API_KEY", "SECRET_KEY") if not keys.get(k)]
     if missing:
         sys.exit(f"naver_key.txt 에 값이 없습니다: {', '.join(missing)}")
     return keys
@@ -98,7 +101,8 @@ def related_keywords(keys, core: str) -> list[tuple[str, int]]:
                headers={"X-Timestamp": ts, "X-API-KEY": keys["API_KEY"], "X-Customer": keys["CUSTOMER_ID"],
                         "X-Signature": sig},
                params={"hintKeywords": core.replace(" ", ""), "showDetail": "1"})
-    return [(i["relKeyword"], to_int(i.get("monthlyPcQcCnt", 0)) + to_int(i.get("monthlyMobileQcCnt", 0)))
+    return [(i["relKeyword"], to_int(i.get("monthlyPcQcCnt", 0)) + to_int(i.get("monthlyMobileQcCnt", 0)),
+             i.get("compIdx", ""))
             for i in data.get("keywordList", [])]
 
 
@@ -134,15 +138,30 @@ def is_related(cand: str, core: str) -> bool:
     return n >= 2
 
 
+COMP_RANK = {"낮음": 0, "중간": 1, "높음": 2}
+
+
+def has_shopping(keys) -> bool:
+    return bool(keys.get("CLIENT_ID") and keys.get("CLIENT_SECRET"))
+
+
 def recommend(keys, core: str, my_brands: set[str]) -> tuple[str, str]:
     cands = {}
-    for kw, vol in related_keywords(keys, core):
+    for kw, vol, comp in related_keywords(keys, core):
         if vol >= MIN_SEARCH and is_related(kw, core):
-            cands.setdefault(norm(kw), (kw, vol))
-    top = sorted(cands.values(), key=lambda x: -x[1])[:MAX_CANDIDATES]
+            cands.setdefault(norm(kw), (kw, vol, comp))
 
+    if not has_shopping(keys):  # 쇼핑 API 없이: 광고 경쟁정도 낮은 순 → 검색량 많은 순
+        ranked = sorted((c for c in cands.values() if not is_brand(c[0], [], my_brands)),
+                        key=lambda c: (COMP_RANK.get(c[2], 3), -c[1]))[:PICK]
+        if not ranked:
+            return "", "조회된 연관키워드 없음"
+        return (" ".join(kw for kw, _, _ in ranked),
+                " / ".join(f"{kw} 경쟁{comp} (검색 {vol:,})" for kw, vol, comp in ranked))
+
+    top = sorted(cands.values(), key=lambda x: -x[1])[:MAX_CANDIDATES]
     scored = []
-    for kw, vol in top:
+    for kw, vol, _ in top:
         total, brands = shopping(keys, kw)
         if is_brand(kw, brands, my_brands):
             continue
@@ -161,6 +180,8 @@ def main() -> None:
     if not in_path.exists():
         sys.exit(f"파일을 찾을 수 없습니다: {in_path}")
     keys, my_brands = load_keys(), load_brands()
+    if not has_shopping(keys):
+        print("※ 쇼핑 API 키(CLIENT_ID/SECRET)가 없어 '광고 경쟁정도' 기준으로 고릅니다.")
 
     print(f"읽는 중: {in_path} (상품이 많으면 1~2분 걸립니다)")
     wb = load_workbook(in_path)
